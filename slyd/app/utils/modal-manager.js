@@ -9,7 +9,7 @@ export default Ember.Object.extend({
     return this.set('name', null);
   },
 
-  open: function(name, title, footerButtons, content, controller, fade) {
+  open: function(name, title, footerButtons, content, component, componentData, controller, fade) {
     if (this.get('name')) {
       return;
     }
@@ -23,9 +23,12 @@ export default Ember.Object.extend({
       targetObject: controller,
       fade: fade,
       body: content,
+      component: component,
+      componentData: componentData,
       templateName: 'components/bs-modal'
     });
     this.add(name, modalComponent);
-    return modalComponent.appendTo(Ember.$('body'));
+    var rootElement = controller.container.lookup('application:main').rootElement;
+    return modalComponent.appendTo(rootElement);
   }
 });

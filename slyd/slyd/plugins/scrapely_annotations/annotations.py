@@ -3,7 +3,7 @@ import json
 from scrapely.htmlpage import parse_html, HtmlTag, HtmlDataFragment
 
 from collections import defaultdict
-from itertools import tee
+from itertools import tee, count
 from uuid import uuid4
 
 from slyd.utils import (serialize_tag, add_tagids, remove_tagids, TAGID,
@@ -14,7 +14,7 @@ class Annotations(object):
 
     def save_extraction_data(self, data, template, options={}):
         """
-        data = {   
+        data = {
             extracts: [
                 {
                     annotatations: {"content": "Title"},
@@ -40,12 +40,21 @@ class Annotations(object):
 
 def _clean_annotation_data(data):
     result = []
+    sticky_count, stickies = count(1), set()
     for ann in data:
         if 'annotations' in ann and ann['annotations']:
-            filtered_annotations = {k: v for k, v in ann['annotations'].items()
-                                    if v and v.strip()}
+            filtered_annotations = {}
+            for k, v in ann['annotations'].items():
+                if not (v and v.strip()):
+                    continue
+                if v == '#sticky':
+                    next_sticky = '_sticky%s' % next(sticky_count)
+                    stickies.add(next_sticky)
+                    v = next_sticky
+                filtered_annotations[k] = v
+
             ann['annotations'] = filtered_annotations
-            ann['required'] = list(set(ann.get('required', [])) &
+            ann['required'] = list((set(ann.get('required', [])) | stickies) &
                                    set(filtered_annotations.values()))
             result.append(ann)
         elif "ignore" in ann or "ignore_beneath" in ann:
@@ -67,7 +76,8 @@ def _gen_annotation_info(annotation):
             'annotations': annotation.get('annotations', {}),
             'required': annotation.get('required', []),
             'variant': int(annotation.get('variant', 0)),
-            'generated': annotation.get('generated', False)
+            'generated': annotation.get('generated', False),
+            'text-content': annotation.get('text-content', 'content'),
         }).replace('"', '&quot;')
     if 'ignore' in annotation or 'ignore_beneath' in annotation:
         if annotation.get('ignore_beneath'):
@@ -111,7 +121,7 @@ def _get_generated_annotation(element, annotations, nodes, html_body, inserts):
             removed = 0
             inserted = False
             for j, (pre, selected, annotation) in enumerate(pre_selected[:]):
-                if selected in text:
+                if selected and selected in text:
                     previous, post = text.split(selected, 1)
                     if previous.strip() in pre:
                         pre_selected.pop(j - removed)
@@ -178,7 +188,7 @@ def _get_inner_nodes(target, open_tags=1, insert_after=False,
                      stop_on_next=False):
     nodes = []
     while open_tags > -0:
-        elem = target.next()
+        elem = next(target)
         if isinstance(elem, HtmlTag):
             if elem.tag_type == OPEN_TAG:
                 open_tags += 1
@@ -213,7 +223,7 @@ def apply_annotations(annotations, target_page):
     target = parse_html(numbered_html)
     output, tag_stack = [], []
 
-    element = target.next()
+    element = next(target)
     last_id = 0
     # XXX: A dummy element is added to the end so if the last annotation is
     #      generated it will be added to the output
@@ -231,7 +241,7 @@ def apply_annotations(annotations, target_page):
             while True:
                 while not isinstance(element, HtmlTag):
                     output.append(numbered_html[element.start:element.end])
-                    element = target.next()
+                    element = next(target)
                 if element.tag_type in {OPEN_TAG, UNPAIRED_TAG}:
                     last_id = element.attributes.get(TAGID)
                     tag_stack.append(last_id)
@@ -247,7 +257,7 @@ def apply_annotations(annotations, target_page):
                         # Skip all nodes up to the next HtmlTag as these
                         # have already been added
                         while True:
-                            element = target.next()
+                            element = next(target)
                             try:
                                 last_id = element.attributes.get(TAGID,
                                                                  last_id)
@@ -260,7 +270,7 @@ def apply_annotations(annotations, target_page):
                     if '__added' not in element.attributes:
                         output.append(numbered_html[element.start:element.end])
                         element.attributes['__added'] = True
-                    element = target.next()
+                    element = next(target)
                 else:
                     break
 
@@ -298,7 +308,7 @@ def apply_annotations(annotations, target_page):
             # If an <ins> tag has been inserted we need to move forward
             if next_text_section:
                 while True:
-                    elem = target.next()
+                    elem = next(target)
                     if (isinstance(elem, HtmlDataFragment) and
                             elem.is_text_content):
                         break

@@ -16,12 +16,16 @@ Router.map(function() {
         this.resource("template", {
           path: ":template_id"
         }, function() {
-          this.resource("items");
+          this.resource("template-items", {
+            path: 'items'
+          });
         });
       });
       this.resource("conflicts");
+      this.resource("items");
     });
   });
+  this.resource("experiments");
   this.route("base-route");
 });
 

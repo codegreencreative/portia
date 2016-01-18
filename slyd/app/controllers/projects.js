@@ -21,9 +21,8 @@ export default BaseController.extend({
     openProject: function(projectName, revision) {
         this.get('slyd').editProject(projectName, revision).then(function() {
             this.set('slyd.project', projectName);
+            this.set('ws.project', projectName);
             this.transitionToRoute('project', { id: projectName });
-        }.bind(this), function(err) {
-            this.showHTTPAlert('Error Opening project "' + projectName + '"', err);
         }.bind(this));
     },
 
@@ -63,9 +62,6 @@ export default BaseController.extend({
                                     }
                                 }
                             }));
-                        }.bind(this),
-                        function(err) {
-                            this.showHTTPAlert('Delete Error', err);
                         }.bind(this)
                     );
                 }.bind(this),
@@ -80,6 +76,7 @@ export default BaseController.extend({
             this.get('slyd').createProject(newProjectName).then(function() {
                 this.get('slyd').editProject(newProjectName).then(function() {
                     this.set('slyd.project', newProjectName);
+                    this.set('ws.project', newProjectName);
                     // Initialize items spec.
                     var itemsPromise = this.get('slyd').saveItems([
                         Item.create({ name: 'default', fields: [ ]
@@ -92,17 +89,15 @@ export default BaseController.extend({
                     Ember.RSVP.all([itemsPromise, extractorsPromise]).then(function() {
                         this.get('model').pushObject({id: newProjectName, name: newProjectName});
                         this.transitionToRoute('project', { id: newProjectName });
-                    }.bind(this), function(err) {this.showHTTPAlert('Save Error', err);}.bind(this));
-                }.bind(this), function(err) {this.showHTTPAlert('Save Error', err);}.bind(this));
-            }.bind(this), function(err) {this.showHTTPAlert('Save Error', err);}.bind(this));
+                    }.bind(this));
+                }.bind(this));
+            }.bind(this));
         },
 
         showProjectRevisions: function(projectName) {
             this.get('slyd').projectRevisions(projectName).then(function(revisions) {
                 this.get('projectRevisions')[projectName] = revisions['revisions'];
                 this.notifyPropertyChange('projectRevisions');
-            }.bind(this), function(err) {
-                this.showHTTPAlert('Error Getting Projects', err);
             }.bind(this));
         },
 
@@ -114,10 +109,10 @@ export default BaseController.extend({
 
     willEnter: function() {
         this.set('breadCrumb', 'home');
-        if (this.get('controllers.application.currentRouteName').split('.')[1] === 'index') {
+        if (this.getWithDefault('controllers.application.currentRouteName', '').split('.')[1] === 'index') {
             this.set('slyd.project', null);
+            this.set('ws.project', null);
         }
         this.get('documentView').reset();
-        this.get('documentView').showSpider();
     },
 });

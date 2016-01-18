@@ -1,10 +1,14 @@
 import Ember from 'ember';
+import GuessTypes from '../../mixins/guess-types';
+import validateFieldName from '../../utils/validate-field-name';
+import NotificationManager from '../../utils/notification-manager';
+import utils from '../../utils/utils';
 
-// TODO: Add ids to name fields. Allow for names to be changed them later.
+// TODO: Add ids to name fields. Allow for names to be changed later.
 
-export default Ember.Component.extend({
+export default Ember.Component.extend(GuessTypes, {
     tagName: 'div',
-    classNameBindings: ['inDoc:in-doc', 'showAnnotation:annotation-widget'],
+    classNameBindings: ['inDoc:in-doc', 'showAnnotation:annotation-widget', 'data.suggested:suggestion'],
     fieldName: null,
     fieldType: null,
     showingBasic: true,
@@ -37,11 +41,26 @@ export default Ember.Component.extend({
             this.sendAction('edit', this.get('data'));
         },
         delete: function() {
+            if(this.get('data.suggested')) {
+                this.get('ws').logEvent('suggestions', this.get('data.suggestor'), 'rejected');
+            }
             this.get('alldata').removeObject(this.get('data'));
             this.get('sprites').removeSprite(this.get('mappedDOMElement'));
-            if (this.get('mappedDOMElement').tagName === 'INS') {
+            if (this.get('mappedDOMElement') && this.get('mappedDOMElement').tagName === 'INS') {
                 this.get('mappedElement').removePartialAnnotation();
             }
+            var id = this.get('data.id'),
+                extracted = this.getWithDefault('pluginState.extracted', []),
+                deleted = extracted.filter(function(ann) {
+                    if (ann.id && id === ann.id) {
+                        return true;
+                    }
+                });
+            deleted.forEach(function(ann) {
+                extracted.removeObject(ann);
+            });
+            this.set('pluginState.extracted', extracted);
+            this.updateData('pluginState.extracted');
             this.closeWidget();
         },
 
@@ -57,6 +76,18 @@ export default Ember.Component.extend({
             if (value === '#create') {
                 value = null;
                 this.set('createNewIndex', index);
+                var annotation = this.get('mappings').get(index),
+                    extractedData = annotation.content,
+                    attribute = annotation.attribute,
+                    element = this.get('mappedDOMElement'),
+                    guess = this.get('guessedAttribute') !== attribute;
+                this.set('guessedType', this.guessFieldType(extractedData, element, guess));
+                var name = this.guessFieldName(element);
+                if (this.get('itemFields').mapBy('value').contains(name)) {
+                    name = null;
+                }
+                this.set('guessedName', name ? name : 'Enter name');
+                this.set('defaultName', name);
                 this.setState(true, false, false);
             } else if (value === '#sticky') {
                 this.setAttr(index, '#sticky', 'field', true);
@@ -85,7 +116,12 @@ export default Ember.Component.extend({
             var fieldName = this.get('newFieldName'),
                 fieldType = this.get('newFieldType');
             if (!fieldName || fieldName.length < 1) {
-                return;
+                var defaultName = this.get('defaultName');
+                if (defaultName && defaultName.length > 0) {
+                    this.set('newFieldName', defaultName);
+                } else {
+                    return;
+                }
             }
             if (!fieldType || fieldType.length < 1) {
                 this.set('newFieldType', 'text');
@@ -116,11 +152,12 @@ export default Ember.Component.extend({
             this.set('ignoring', true);
             this.set('previousListener', this.get('document.view.listener'));
             this.get('document.view').config({
+                mode: 'select',
                 listener: this,
                 partialSelects: false
             });
             this.set('document.view.restrictToDescendants', this.get('mappedElement'));
-            this.get('document.view').setInteractionsBlocked(false);
+            this.get('document.view').unblockInteractions('indoc-annotation');
             this.hide();
         },
 
@@ -129,12 +166,13 @@ export default Ember.Component.extend({
                 ignoreData = this.get('alldata').findBy('tagid', ignore.tagid);
             this.get('alldata').removeObject(ignoreData);
             this.get('pluginState.ignores').removeObject(ignore);
+            this.get('sprites').removeIgnore(ignore.get('element').get(0));
             this.updateData('pluginState');
         },
 
         ignoreBeneath: function(_, value, index) {
             var ignore = this.get('pluginState.ignores').objectAt(index),
-                ignoreData = this.get('alldata').findBy('tagid', ignore.tagid);
+                ignoreData = this.get('alldata').findBy('tagid', ignore.get('tagid'));
             ignore.set('ignoreBeneath', value);
             ignoreData['ignore_beneath'] = value;
             this.updateData('pluginState');
@@ -157,7 +195,12 @@ export default Ember.Component.extend({
             } else {
                 this.mapToNewElement(data.data.element);
             }
-        }
+        },
+
+        acceptSuggestion: function(){
+            this.set('data.suggested', false);
+            this.get('ws').logEvent('suggestions', this.get('data.suggestor'), 'accepted');
+        },
     },
 
     //*******************************************************************\\
@@ -176,19 +219,19 @@ export default Ember.Component.extend({
                     ignored = ignoreData;
                 } else {
                     ignored = {
-                        id: this.s4() + '-' + this.s4() + '-' + this.s4(),
+                        id: utils.shortGuid(),
                         tagid: tagid,
                         ignore: true,
                         ignore_beneath: false
                     };
                     this.get('alldata').pushObject(ignored);
                 }
-                this.get('pluginState.ignores').pushObject({
+                this.get('pluginState.ignores').pushObject(Ember.Object.create({
                     id: ignored.id,
                     tagid: tagid,
                     element: jqElem,
                     ignoreBeneath: ignored.ignore_beneath
-                });
+                }));
                 this.updateData('pluginState');
 
                 this.get('document.view').config({
@@ -196,7 +239,7 @@ export default Ember.Component.extend({
                     partialSelects: true
                 });
                 this.set('document.view.restrictToDescendants', null);
-                this.get('document.view').setInteractionsBlocked(this.get('inDoc'));
+                this.get('document.view').setInteractionsBlocked(this.get('inDoc'), 'indoc-annotation');
                 this.set('ignoring', false);
                 this.show();
             }
@@ -213,17 +256,13 @@ export default Ember.Component.extend({
     //
     //*******************************************************************\\
 
-    s4: function() {
-        return Math.floor((1 + Math.random()) * 0x10000).toString(16).substring(1);
-    },
-
     createAnnotationData: function(generatedData) {
         var element = this.get('mappedElement'),
             data = {
                 annotations: {},
                 required: [],
                 variant: 0,
-                id: this.s4() + '-' + this.s4() + '-' + this.s4(),
+                id: utils.shortGuid(),
                 tagid: element.data('tagid')
             };
         if (element.prop('tagName') === 'INS') {
@@ -258,11 +297,11 @@ export default Ember.Component.extend({
             }
             update = true;
         }
-        if (required && !annotation['required']) {
+        if ((required || required === false) && annotation['required'] !== required) {
             try {
-                annotation.set('required', true);
+                annotation.set('required', required);
             } catch(e) {
-                annotation['required'] = true;
+                annotation['required'] = required;
             }
             update = true;
         }
@@ -313,6 +352,9 @@ export default Ember.Component.extend({
         });
         this.set('data.annotations', annotations);
         this.set('data.required', required);
+        if (this.get('mappedElement').attr('content')) {
+            this.set('data.text-content', 'text content');
+        }
         this.updateExtractedFields();
         this.notifyPropertyChange('sprite');
     },
@@ -327,18 +369,19 @@ export default Ember.Component.extend({
                         return true;
                     }
                 });
+        let suggested = this.get('data.suggested');
         for (var key in annotations) {
             var fieldName = annotations[key];
-            if (fieldName && fieldName[0] !== '#') {
-                extracted.push({
+            if (!suggested && fieldName && fieldName[0] !== '#') {
+                extracted.pushObject({
                     id: id,
                     name: fieldName,
-                    required: required.indexOf(annotations[key]) > 0
+                    required: required.indexOf(annotations[key]) > -1
                 });
             }
         }
         this.set('pluginState.extracted', extracted);
-        this.updateData('pluginState');
+        this.updateData('pluginState.extracted');
     },
 
     //*******************************************************************\\
@@ -441,7 +484,7 @@ export default Ember.Component.extend({
     closeWidget: function() {
         this.sendAction('close');
         this.reset();
-        this.get('document.view').setInteractionsBlocked(false);
+        this.get('document.view').unblockInteractions('indoc-annotation');
         this.destroy();
     },
 
@@ -462,9 +505,10 @@ export default Ember.Component.extend({
     }.property('data.ignore', 'data.annotations'),
 
     updateSprite: function() {
-        var text = [],
-            data = this.get('data'),
-            annotations = this.get('data.annotations');
+        let text = [];
+        let data = this.get('data');
+        let annotations = this.get('data.annotations');
+
         if (!data || (data.ignore && !data.annotations)) {
             return;
         }
@@ -478,8 +522,13 @@ export default Ember.Component.extend({
         } else {
             text = text.join(', ');
         }
-        this.get('sprites').addSprite(this.get('mappedDOMElement'), text);
-    }.observes('sprite'),
+        if(data.suggested) {
+            text = 'Suggestion: ' + text;
+        }
+        this.get('sprites').addSprite(this.get('mappedDOMElement'), text, {
+            fillColor: data.suggested ? 'rgba(28, 171, 76, 0.4)' : this.get('sprites.fillColor'),
+        });
+    }.observes('sprite', 'data.suggested'),
 
     updateIgnore: function() {
         var data = this.get('data');
@@ -501,7 +550,7 @@ export default Ember.Component.extend({
             }
             Ember.$(this.get('element')).css({ 'top': Math.max(y, 50),
                                          'left': Math.max(x - 100, 50)});
-            this.get('document.view').setInteractionsBlocked(true);
+            this.get('document.view').blockInteractions('indoc-annotation');
         }
     },
 
@@ -619,28 +668,34 @@ export default Ember.Component.extend({
     },
 
     mapToElement: function() {
-        if (!this.get('mappedElement') && this.get('data')) {
+        if (!this.get('mappedDOMElement') && this.get('data')) {
             var data = this.get('data'),
                 id = data.id,
                 generated = data.generated,
                 insertAfter = data.insert_after,
+                iframe = this.getIframe(),
                 tagid = data.tagid;
             if (generated) {
-                var elem = this.get('document.iframe').find('[data-genid=' + id + ']');
+                var elem = iframe.find('[data-genid=' + id + ']');
                 if (elem.length < 1) {
                     if (insertAfter) {
-                        elem = this.get('document.iframe').find('[data-tagid=' + tagid + ']').parent().find('ins');
+                        elem = iframe.find('[data-tagid=' + tagid + ']').parent().find('ins');
                     } else {
-                        elem = this.get('document.iframe').find('[data-tagid=' + tagid + ']').siblings('ins');
+                        elem = iframe.find('[data-tagid=' + tagid + ']').siblings('ins');
                     }
                 }
                 this.set('mappedElement', elem);
             } else {
-                this.set('mappedElement', this.get('document.iframe').find('[data-tagid=' + tagid + ']'));
+                this.set('mappedElement', iframe.find('[data-tagid=' + tagid + ']'));
             }
             this.set('mappedDOMElement', this.get('mappedElement').get(0));
         }
-        this.notifyPropertyChange('sprite');
+        this.updateSprite();
+        this.updateIgnore();
+    },
+
+    getIframe: function() {
+        return this.get('document.view').getIframe();
     },
 
     mapToNewElement: function(elem) {
@@ -809,10 +864,18 @@ export default Ember.Component.extend({
         var fieldName = this.get('newFieldName'),
             fieldType = this.get('newFieldType'),
             attrIndex = this.get('createNewIndex');
+
+        var error = validateFieldName(fieldName, this.getWithDefault('item.fields', []));
+        if(error) {
+            return NotificationManager.showWarningNotification('Validation Error', error);
+        }
         if (fieldName && fieldName.length > 0 && fieldType) {
             this.set('newFieldType', null);
             this.set('newFieldName', null);
             this.set('createNewIndex', null);
+            this.set('guessedName', null);
+            this.set('guessedType', null);
+            this.set('defaultName', null);
             this.sendAction('createField', this.get('item'), fieldName, fieldType);
             this.setAttr(attrIndex, fieldName, 'field');
             this.setState(false, false, true);
@@ -825,7 +888,13 @@ export default Ember.Component.extend({
         if (!annotations || attributes.length < 1) {
             return;
         }
-        annotations[attributes.get(0)] = null;
+        var attribute = this.guessFieldExtraction(this.get('mappedDOMElement'),
+                                                  attributes);
+        this.set('guessedAttribute', attribute);
+        if (!attribute) {
+            attribute = attributes.get(0);
+        }
+        annotations[attribute] = null;
         this.set('data.annotations', annotations);
         this.notifyPropertyChange('data.annotations');
     },
@@ -899,8 +968,19 @@ export default Ember.Component.extend({
         Ember.run.scheduleOnce('afterRender', this, this.afterRenderEvent);
     },
 
+    willDestroyElement: function(){
+        this.get('sprites').removeSprite(this.get('mappedDOMElement'));
+        if(this.get('inDoc')) {
+            this.get('document.view').unblockInteractions('indoc-annotation');
+        }
+    },
+
     afterRenderEvent: function() {
-        this.notifyPropertyChange('sprite');
-    }
+        Ember.run.next(this, function() {
+            this.mapToElement();
+            this.notifyPropertyChange('sprite');
+            this.notifyPropertyChange('data.tagid');
+        });
+    }.observes('document.iframe')
 
 });

@@ -5,7 +5,7 @@ import {
 
 moduleForComponent('top-bar', 'TopBarComponent', {
   // specify the other units that are required for this test
-  // needs: ['component:foo', 'helper:bar']
+   needs: ['component:bs-label']
 });
 
 test('it renders', function() {

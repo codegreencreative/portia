@@ -6,17 +6,13 @@ export default BsButton.extend({
 
     classNameBindings: ['pinned'],
 
-    disabled: function() {
-        return this.get('toolbox.fixed');
-    }.property('toolbox.fixed'),
-
-    pinned: function() {
-        return this.disabled || this.get('toolbox.pinned');
-    }.property('toolbox.fixed', 'toolbox.pinned'),
+    disabled: Ember.computed.reads('toolbox.fixed'),
+    pinned: Ember.computed.or('toolbox.fixed', 'toolbox.pinned'),
 
     click: function() {
-        this.set('toolbox.pinned', !this.get('toolbox.pinned'));
-        this.set('pinned', this.get('toolbox.pinned'));
-        this.notifyPropertyChange('pinned');
+        this.toggleProperty('toolbox.pinned');
+        if(window.localStorage) {
+            localStorage.portia_toolbox_pinned = this.get('toolbox.pinned') ? 'true' : '';
+        }
     },
 });

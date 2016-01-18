@@ -1,8 +1,7 @@
 import Ember from 'ember';
 import BaseController from './base-controller';
 import Spider from '../models/spider';
-
-/* global URI */
+import utils from '../utils/utils';
 
 export default BaseController.extend({
     fixedToolbox: true,
@@ -16,6 +15,79 @@ export default BaseController.extend({
         this.set('breadCrumb', this._project_name(project_id));
         this.set('breadCrumbModel', project_id);
     },
+
+    additionalActions: function() {
+        function makeCopyMessage(type, copied, renamed) {
+            return copied.length + " " + type + (copied.length > 1 ? "s" : "") +
+                " (" + copied.map(function(item) {
+                    if (renamed[item]) {
+                        return item + " as " + renamed[item];
+                    }
+                    return item;
+                }).join(", ") + ")";
+        }
+
+        var copyAction = {
+            modal: 'copy-spider',
+            text: 'Copy Spider',
+            title: 'Copy Spider to project',
+            button_class: 'primary',
+            button_text: 'Copy',
+            okCallback: function() {
+                if (!copyAction.params.spiders.length && !copyAction.params.items.length) {
+                    return;
+                }
+                this.get('slyd').copySpider(
+                    this.get('slyd.project'),
+                    copyAction.params.destinationProject,
+                    copyAction.params.spiders,
+                    copyAction.params.items
+                ).then(function(response) {
+                    /*
+                        Create a notification message like:
+                            Successfully copied 2 spiders (spider1, spider2 as spider2_copy)
+                            and 1 item (default as default_copy).
+                    */
+                    var copiedSpiders = response.copied_spiders;
+                    var renamedSpiders = response.renamed_spiders;
+                    var copiedItems = response.copied_items;
+                    var renamedItems = response.renamed_items;
+                    var messageParts = [];
+                    if (copiedSpiders.length) {
+                        messageParts.push(
+                            makeCopyMessage("spider", copiedSpiders, renamedSpiders)
+                        );
+                    }
+                    if (copiedItems.length) {
+                        messageParts.push(
+                            makeCopyMessage("item", copiedItems, renamedItems)
+                        );
+                    }
+                    if (messageParts.length) {
+                        this.showSuccessNotification(
+                            "Successfully copied " +
+                            messageParts.join(" and ") + "."
+                        );
+                    }
+                }.bind(this));
+            }.bind(this)
+        };
+
+        return [
+            {
+                component: 'file-download'
+            },
+            copyAction,
+            {
+                component: 'edit-items',
+                controller: this
+            },
+            {
+                text: 'Documentation',
+                url: 'http://support.scrapinghub.com/list/24895-knowledge-base/?category=17201'
+            }
+        ];
+    }.property(),
 
     needs: ['application', 'project'],
 
@@ -56,23 +128,24 @@ export default BaseController.extend({
     }.property('hasChanges', 'isDeploying', 'isPublishing'),
 
     addSpider: function(siteUrl) {
-        if (this.get('addingNewSpider')) {
+        siteUrl = utils.cleanUrl(siteUrl);
+        if (!siteUrl || this.get('addingNewSpider')) {
             return;
         }
         this.set('addingNewSpider', true);
-        if (siteUrl.indexOf('http') !== 0) {
-            siteUrl = 'http://' + siteUrl;
-        }
+
         var documentView = this.get('documentView');
         documentView.showLoading();
         this.set('slyd.spider', null);
-        this.get('slyd').fetchDocument(siteUrl)
-            .then(function(data) {
+        this.set('ws.spider', null);
+        this.get('ws')._sendPromise({
+            _command: 'resolve',
+            _meta: {id: utils.shortGuid()},
+            url: siteUrl
+        }).then(function(data) {
                 if (data.error) {
                     documentView.hideLoading();
-                    var title = "Spider wasn't created";
-                    var content = "Server responded with error: <br><br>" + data.error;
-                    this.showAlert(title, content);
+                    this.showErrorNotification('Failed to create spider', data.error);
                     return;
                 }
                 // XXX: Deal with incorrect model
@@ -83,27 +156,32 @@ export default BaseController.extend({
                 var baseName = URI.parse(siteUrl).hostname.replace(/^www[0-9]?\./, '');
                 var newSpiderName = this.getUnusedName(baseName, names);
                 var spider = Spider.create(
-                    { 'id': this.shortGuid(),
-                      'name': newSpiderName,
+                    { 'name': newSpiderName,
                       'start_urls': [siteUrl],
                       'follow_patterns': [],
                       'exclude_patterns': [],
+                      'js_enabled': false,
                       'init_requests': [],
                       'templates': [],
                       'template_names': [],
                       'plugins': {}
                     });
-                this.get('slyd').saveSpider(spider).then(function() {
+                this.set('ws.spider', newSpiderName);
+                this.get('ws').save('spider', spider).then(function() {
                         documentView.hideLoading();
                         this.set('slyd.spider', newSpiderName);
+                        this.set('ws.spider', newSpiderName);
                         this.editSpider(newSpiderName, siteUrl);
                     }.bind(this), function(err) {
                         documentView.hideLoading();
-                        this.showHTTPAlert('Error Adding Spider', err);
+                        this.set('ws.spider', this.get('slyd.spider'));
+                        throw err;  // re-throw for the notification
                     }.bind(this)
                 );
-
-            }.bind(this))
+            }.bind(this), function(err) {
+                documentView.hideLoading();
+                throw err;  // re-throw for the notification
+            })
             .finally(function() {
                 this.set('controllers.application.siteWizard', null);
                 this.set('spiderPage', null);
@@ -120,8 +198,6 @@ export default BaseController.extend({
             } else {
                 this.transitionToRoute('spider', spider);
             }
-        }.bind(this), function(err) {
-            this.showHTTPAlert('Error Editing Spider', err);
         }.bind(this));
     },
 
@@ -152,14 +228,13 @@ export default BaseController.extend({
             this.showConfirm('Delete ' + spiderName,
                 'Are you sure you want to delete spider ' + spiderName + '?',
                 function() {
-                    this.get('slyd').deleteSpider(spiderName).then(
+                    this.set('ws.spider', spiderName);
+                    this.get('ws').delete('spider', spiderName).then(
                         function() {
+                            this.set('ws.spider', null);
                             this.get('model').removeObject(spiderName);
                             this.set('refreshSpiders', !this.get('refreshSpiders'));
                             this.get('changedFiles').addObject('spiders/' + spiderName + '.json');
-                        }.bind(this),
-                        function(err) {
-                            this.showHTTPAlert('Delete Error', err);
                         }.bind(this)
                     );
                 }.bind(this), null, 'danger', 'Yes, Delete'
@@ -170,11 +245,13 @@ export default BaseController.extend({
             this.get('slyd').renameProject(oldName, newName).then(
                 function() {
                     this.set('slyd.project', newName);
+                    this.set('ws.project', newName);
                     this.replaceRoute('project', newName);
                 }.bind(this),
-                function() {
+                function(err) {
                     this.set('slyd.project', oldName);
-                    this.showAlert('Save Error','The name ' + newName + ' is not a valid project name.');
+                    this.set('ws.project', oldName);
+                    throw err;
                 }.bind(this)
             );
         },
@@ -191,18 +268,19 @@ export default BaseController.extend({
                                 window.location = result['schedule_url'];
                             });
                     } else {
-                        this.showAlert('Publish Successful', this.messages.get('publish_ok'));
+                        this.showSuccessNotification(this.messages.get('publish_ok'));
                     }
                     this.set('changedFiles', []);
                 } else if (result['status'] === 'conflict') {
-                    this.showAlert('Publish Error', this.messages.get('publish_conflict'));
+                    this.showWarningNotification(this.messages.get('publish_conflict'));
                     this.transitionToRoute('conflicts');
                 } else {
-                    this.showAlert('Publish Error', result['message']);
+                    this.showErrorNotification('Failed to publish project', result['message']);
                 }
-            }.bind(this), function() {
+            }.bind(this), function(err) {
                 this.set('isPublishing', false);
-            });
+                throw err;
+            }.bind(this));
         },
 
         deployProject: function() {
@@ -217,12 +295,12 @@ export default BaseController.extend({
                                 window.location = result['schedule_url'];
                             });
                     } else {
-                        this.showAlert('Save Successful', this.messages.get('deploy_ok'));
+                        this.showSuccessNotification(this.messages.get('deploy_ok'));
                     }
                 }
             }.bind(this), function(err) {
                 this.set('isDeploying', false);
-                this.showHTTPAlert('Deploy Error', err);
+                throw err;
             }.bind(this));
         },
 
@@ -233,7 +311,7 @@ export default BaseController.extend({
                 this.transitionToRoute('projects');
             }.bind(this), function(err) {
                 this.set('isPublishing', false);
-                this.showHTTPAlert('Revert Error', err);
+                throw err;
             }.bind(this));
         },
 
@@ -245,7 +323,6 @@ export default BaseController.extend({
     willEnter: function() {
         this.setBreadCrumb();
         this.get('documentView').reset();
-        this.get('documentView').showSpider();
         if (this.get('controllers.application.siteWizard')) {
             Ember.run.next(this, this.addSpider,
                            this.get('controllers.application.siteWizard'));

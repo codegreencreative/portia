@@ -1,11 +1,17 @@
 import Ember from 'ember';
 import SimpleModel from './simple-model';
 
+const ARRAY_PROPERTIES = ["start_urls", "follow_patterns", "exclude_patterns",
+    "js_enable_patterns", "js_disable_patterns", "allowed_domains",
+    "templates", "template_names", "page_actions"
+];
+
 export default SimpleModel.extend({
     serializedProperties: ['start_urls',
         'start_urls', 'links_to_follow', 'follow_patterns',
+        'js_enabled', 'js_enable_patterns', 'js_disable_patterns',
         'exclude_patterns', 'respect_nofollow',
-        'init_requests', 'template_names'],
+        'init_requests', 'template_names', 'page_actions'],
     serializedRelations: ['templates'],
     start_urls: null,
     links_to_follow: 'patterns',
@@ -15,17 +21,27 @@ export default SimpleModel.extend({
     templates: null,
     template_names: null,
     init_requests: null,
+    page_actions: null,
 
     init: function() {
-        if (this.get('init_requests') === null) {
-            this.set('init_requests', []);
-        }
+        ARRAY_PROPERTIES.forEach((prop) => {
+            if (!this.get(prop)) {
+                this.set(prop, Ember.A());
+            }
+        });
 
-        this.get('serializedProperties').forEach(function(prop) {
-            this.addObserver(prop + '.[]', function() {
-                this.notifyPropertyChange('dirty');
-            }.bind(this));
-        }.bind(this));
+        let markDirty = () => this.notifyPropertyChange('dirty');
+        this.serializedProperties.forEach((prop) => {
+            this.addObserver(prop + '.[]', markDirty);
+        });
+    },
+
+    serialize: function(){
+        this.page_actions.forEach((pa) => {
+            delete pa.target;
+            delete pa._edited;
+        });
+        return this._super();
     },
 
     performLogin: function(key, performLogin) {

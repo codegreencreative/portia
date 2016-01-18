@@ -37,22 +37,37 @@ export function initialize() {
     };
 
     Ember.$.fn.getAttributeList = function() {
-        var attributeList = [];
+        var attributeList = [],
+            text_content_key = 'content';
+        if (this.attr('content')) {
+            text_content_key = 'text content';
+        }
         if (this.text()) {
             attributeList.push(Attribute.create({
-                name: 'content',
+                name: text_content_key,
                 value: this.text()}));
         }
         var element = this.get(0);
         if (!element) {
             return [];
         }
+        var mappedAttributes = {};
+        for (var i = 0; i < element.attributes.length; i++) {
+            var attrib = element.attributes[i];
+            if (attrib.name.startsWith('_portia_')) {
+                var originalName = attrib.name.slice(8);
+                if (!mappedAttributes[originalName]) {
+                    mappedAttributes[originalName] = attrib.value;
+                }
+            }
+        }
         Ember.$(element.attributes).each(function() {
-            if (Ember.$.inArray(this.nodeName, Ember.$.fn.getAttributeList.ignoredAttributes) === -1 &&
+            if (!this.nodeName.startsWith('_portia_') &&
+                Ember.$.inArray(this.nodeName, Ember.$.fn.getAttributeList.ignoredAttributes) === -1 &&
                 this.value) {
                 attributeList.push(Attribute.create({
                     name: this.nodeName,
-                    value: this.value}));
+                    value: mappedAttributes[this.nodeName] || this.value}));
             }
         });
         return attributeList;
@@ -61,7 +76,7 @@ export function initialize() {
     Ember.$.fn.getAttributeList.ignoredAttributes = ['id', 'class',
         'width', 'style', 'height', 'cellpadding',
         'cellspacing', 'border', 'bgcolor', 'color', 'colspan',
-        'data-scrapy-annotate', 'data-tagid', 'data-genid'];
+        'data-scrapy-annotate', 'data-tagid', 'data-genid', 'data-parentid'];
 
     Ember.$.fn.boundingBox = function() {
         if (!this || !this.offset()) {
@@ -129,6 +144,16 @@ export function initialize() {
     String.prototype.lstrip = function() {
         return this.replace(/^[\s\r\n]*/g, "");
     };
+
+    if (!String.prototype.trim) {
+      (function() {
+        // Make sure we trim BOM and NBSP
+        var rtrim = /^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g;
+        String.prototype.trim = function() {
+          return this.replace(rtrim, '');
+        };
+      })();
+    }
 }
 
 export default {

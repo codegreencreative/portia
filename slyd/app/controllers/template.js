@@ -2,10 +2,13 @@ import Ember from 'ember';
 import BaseController from './base-controller';
 import Extractor from '../models/extractor';
 import MappedFieldData from '../models/mapped-field-data';
+import Item from '../models/item';
+import ItemField from '../models/item-field';
 import SpriteStore from '../utils/sprite-store';
+import utils from '../utils/utils';
+import { suggestAnnotations } from '../utils/suggest-annotations';
 
 export default BaseController.extend({
-
     model: null,
 
     needs: ['application', 'projects', 'project', 'spider', 'spider/index'],
@@ -61,12 +64,6 @@ export default BaseController.extend({
         }
 
         this.set('activeExtractionTool', this.get('extractionTools.' + tool_name));
-        this.get('documentView').config({
-            mode: 'select',
-            listener: this,
-            dataSource: this,
-            partialSelects: true,
-        });
         this.set('documentView.sprites', this.get('activeExtractionTool.sprites'));
     },
 
@@ -75,10 +72,15 @@ export default BaseController.extend({
 
     scrapedItem: function() {
         if (!Ember.isEmpty(this.get('items'))) {
-            return this.get('items').findBy('name', this.get('model.scrapes'));
-        } else {
-            return null;
+            var item = this.get('items').findBy('name', this.get('model.scrapes'));
+            if(item) {
+                if (!item.fields) {
+                    item.fields = [];
+                }
+                return item;
+            }
         }
+        return null;
     }.property('model.scrapes', 'items.@each'),
 
     displayExtractors: function() {
@@ -98,6 +100,7 @@ export default BaseController.extend({
     }.property('activeExtractionTool', 'activeExtractionTool.sprites'),
 
     saveTemplate: function() {
+        this.dissmissAllSuggestions();
         if (this.get('model')) {
             this.set('model.extractors', this.validateExtractors());
             this.set('model.plugins', this.getWithDefault('model.plugins', {}));
@@ -108,12 +111,11 @@ export default BaseController.extend({
         }
         var missingFields = this.getMissingFields();
         if (missingFields.length > 0) {
-            this.showAlert('Required Fields Missing',
+            this.showWarningNotification('Required Fields Missing',
                 'You are unable to save this template as the following required fields are missing: "' +
                 missingFields.join('", "') + '".');
         } else {
-            return this.get('slyd').saveTemplate(
-                this.get('controllers.spider.name'), this.get('model'));
+            return this.get('ws').save('template', this.get('model'));
         }
     },
 
@@ -142,11 +144,19 @@ export default BaseController.extend({
     },
 
     saveExtractors: function() {
+        var serializedExtractors = {},
+            extractors = this.get('extractors');
         // Cleanup extractor objects.
-        this.get('extractors').forEach(function(extractor) {
+        extractors.forEach(function(extractor) {
             delete extractor['dragging'];
         });
-        this.get('slyd').saveExtractors(this.get('extractors'));
+        for (var i=0; i < extractors.length; i++) {
+            let extractor = extractors[i].serialize(),
+                name = extractor.name;
+            delete extractor['name'];
+            serializedExtractors[name] = extractor;
+        }
+        this.get('ws').save('extractors', serializedExtractors);
     },
 
     validateExtractors: function() {
@@ -154,10 +164,9 @@ export default BaseController.extend({
             template_ext = this.get('model.extractors'),
             new_extractors = {},
             validated_extractors = {},
-            extractor_ids = {},
-            arr = [],
+            extractor_ids = new Set(),
             addExtractorToSet = function(extractor_id) {
-                if (extractor_ids[extractor_id]) {
+                if (extractor_ids.has(extractor_id)) {
                     new_extractors[field] = new_extractors[field] || new Set();
                     new_extractors[field].add(extractor_id);
                 }
@@ -166,7 +175,7 @@ export default BaseController.extend({
                 arr.push(extractor);
             };
         extractors.forEach(function(extractor) {
-            extractor_ids[extractor.id] = true;
+            extractor_ids.add(extractor.id);
         });
 
         for (var plugin in this.get('extractionTools')) {
@@ -181,6 +190,7 @@ export default BaseController.extend({
         }
 
         for (var key in new_extractors) {
+            var arr = [];
             new_extractors[key].forEach(addExtractorToArray);
             validated_extractors[key] = arr;
         }
@@ -188,20 +198,22 @@ export default BaseController.extend({
     },
 
     getAppliedExtractors: function(fieldName) {
-        var extractorIds = this.get('model.extractors.' + fieldName) || [];
-        return extractorIds.map(function(extractorId) {
-                var extractor = this.get('extractors').filterBy('name', extractorId)[0];
-                if (extractor) {
-                    extractor = extractor.copy();
-                    extractor['fieldName'] = fieldName;
-                    extractor['type'] = extractor.get('regular_expression') ? '<RegEx>' : '<Type>';
-                    extractor['label'] = extractor.get('regular_expression') || extractor.get('type_extractor');
-                    return extractor;
-                } else {
-                    return null;
+        var extractorIds = this.get('model.extractors.' + fieldName) || [],
+            extractors = [], seen = new Set();
+        for (var i=0; i < extractorIds.length; i++) {
+            var extractor = this.get('extractors').filterBy('name', extractorIds[i])[0];
+            if (extractor) {
+                extractor = extractor.copy();
+                extractor['fieldName'] = fieldName;
+                extractor['type'] = extractor.get('regular_expression') ? '<RegEx>' : '<Type>';
+                extractor['label'] = extractor.get('regular_expression') || extractor.get('type_extractor');
+                if (!seen.has(extractor['type']+extractor['label'])) {
+                    extractors.push(extractor);
+                    seen.add(extractor['type']+extractor['label']);
                 }
-            }.bind(this)
-        ).filter(function(extractor){ return !!extractor; });
+            }
+        }
+        return extractors;
     },
 
     mappedFieldsData: function() {
@@ -224,9 +236,10 @@ export default BaseController.extend({
             for (var i = 0; i < extractedFields.length; i++) {
                 var field = extractedFields[i];
                 if (scrapedItemFields.has(field.name)) {
-                    var mappedFieldData = mappedFields[field.name] || MappedFieldData.create();
+                    var mappedFieldData = mappedFields[field.name] || MappedFieldData.create(),
+                        required = mappedFieldData.required ? true : field.required || item_required_fields.has(field.name);
                     mappedFieldData.set('fieldName', field.name);
-                    mappedFieldData.set('required', mappedFieldData.required ? true : field.required);
+                    mappedFieldData.set('required', required);
                     mappedFieldData.set('disabled', true);
                     mappedFieldData.set('extracted', true);
                     mappedFieldData.set('extractors', this.getAppliedExtractors(field.name));
@@ -253,19 +266,19 @@ export default BaseController.extend({
         return mappedFieldsData;
     }.property('model.extractors.@each',
                'extractors.@each',
-               'activeExtractionTool.pluginsState.extracted',
+               'activeExtractionTool.pluginState.extracted',
                'scrapedItem.fields.@each'),
 
     createExtractor: function(extractorType, extractorDefinition) {
         var extractor = Extractor.create({
-            name: this.shortGuid(),
+            name: utils.shortGuid(),
         });
         if (extractorType === 'regular_expression') {
             try {
                 new RegExp(extractorDefinition);
             } catch (e) {
                 if (e instanceof SyntaxError) {
-                    this.showAlert('Save Error','The text, "' + extractorDefinition + '", you provided is not a valid regex.');
+                    this.showErrorNotification('The text, "' + extractorDefinition + '", you provided is not a valid regex.');
                 }
                 return;
             }
@@ -274,7 +287,7 @@ export default BaseController.extend({
         this.get('extractors').pushObject(extractor);
     },
 
-    showFloatingAnnotationWidget: function(_, element, x, y) {
+    showFloatingAnnotationWidget: function(element, x, y) {
         this.set('showFloatingAnnotationWidgetAt', { x: x, y: y });
         this.set('floatingElement', Ember.$(element));
     },
@@ -283,21 +296,52 @@ export default BaseController.extend({
         this.set('showFloatingAnnotationWidgetAt', null);
     },
 
+    /**
+     * @returns bool indicating if the user has created any annotation.
+     */
+    hasAnnotations: function() {
+        for (let tool of Object.values(this.get('extractionTools'))) {
+            let annotations = (tool.pluginState || {}).extracted || [];
+            if(annotations.length) {
+                return true;
+            }
+        }
+        return false;
+    },
+
     actions: {
 
         createField: function(item, fieldName, fieldType) {
             item.addField(fieldName, fieldType);
-            this.get('slyd').saveItems(this.get('items').toArray()).then(function() { },
-                function(reason) {
-                    this.showHTTPAlert('Save Error', reason);
-                }.bind(this)
-            );
+            var items = this.get('items').toArray(),
+                slyd = this.get('slyd');
+            items = items.map(function(item) {
+                item = item.serialize();
+                if (item.fields) {
+                    item.fields = slyd.listToDict(item.fields);
+                }
+                return item;
+            });
+            items = slyd.listToDict(items);
+            this.get('ws').save('items', items).then(function(data) {
+
+                items = slyd.dictToList(data.saved.items, Item);
+                items.forEach(function(item) {
+                    if (item.fields) {
+                        item.fields = slyd.dictToList(item.fields, ItemField);
+                    }
+                });
+                this.set('project_models.items', items);
+            }.bind(this));
         },
 
         rename: function(newName) {
             var oldName = this.get('model.name');
             var saveFuture = this.saveTemplate();
             if (!saveFuture) {
+                Ember.run.next(this, function() {
+                    this.set('model.name', oldName);
+                });
                 return;
             }
             this.set('templateName', oldName);
@@ -305,16 +349,15 @@ export default BaseController.extend({
             saveFuture.then(function() {
                 var templateNames = this.get('controllers.spider.model.template_names');
                 newName = this.getUnusedName(newName, templateNames);
-                var spiderName = this.get('controllers.spider.model.name');
-                this.get('slyd').renameTemplate(spiderName, oldName, newName).then(
+                this.get('ws').rename('template', oldName, newName).then(
                     function() {
                         templateNames.removeObject(oldName);
                         templateNames.addObject(newName);
                         this.replaceRoute('template', newName);
                     }.bind(this),
-                    function() {
+                    function(err) {
                         this.set('model.name', this.get('templateName'));
-                        this.showHTTPAlert('Save Error', 'The name ' + newName + ' is not a valid template name.');
+                        throw err;
                     }.bind(this)
                 );
             }.bind(this));
@@ -363,7 +406,7 @@ export default BaseController.extend({
         },
 
         editItems: function() {
-            this.transitionToRoute('items');
+            this.transitionToRoute('template-items');
         },
 
         continueBrowsing: function() {
@@ -380,19 +423,32 @@ export default BaseController.extend({
                     }
                 });
             }.bind(this),
-            function(reason) {
+            function(err) {
                 this.set('documentView.sprites', sprites);
-                this.showHTTPAlert('Save Error', reason);
+                throw err;
             }.bind(this));
         },
 
         discardChanges: function() {
+            let finishDiscard = () => {
+                this.transitionToRoute('spider', {
+                    queryParams: {
+                        url: this.get('model.url')
+                    }
+                });
+            };
             this.set('documentView.sprites', new SpriteStore());
-            this.transitionToRoute('spider', {
-                queryParams: {
-                    url: this.get('model.url')
-                }
-            });
+
+            if (this.hasAnnotations()) {
+                finishDiscard();
+            } else {
+                this.get('slyd')
+                    .deleteTemplate(this.get('slyd.spider'), this.get('model.name'))
+                    .then(() => {
+                        this.get('controllers.spider.model.template_names').removeObject(this.get('model.name'));
+                    })
+                    .then(finishDiscard);
+            }
         },
 
         hideFloatingAnnotationWidget: function() {
@@ -406,25 +462,32 @@ export default BaseController.extend({
         updatePluginField: function(field, value) {
             this.set(['extractionTools', this.get('activeExtractionTool.component'), field].join('.'),
                      value);
+            this.notifyPropertyChange(['activeExtractionTool', field].join('.'));
         },
 
         updateScraped: function(name) {
             this.set('model.scrapes', name);
         },
+
+        dissmissAllSuggestions: function(){
+            this.dissmissAllSuggestions(true);
+        },
+
+        acceptAllSuggestions: function(){
+            this.acceptAllSuggestions();
+        }
     },
 
     documentActions: {
 
         elementSelected: function(element, mouseX, mouseY) {
-            if (element) {
-                this.showFloatingAnnotationWidget(null, element, mouseX, mouseY);
-            }
+            this.showFloatingAnnotationWidget(element, mouseX, mouseY);
         },
 
         partialSelection: function(selection, mouseX, mouseY) {
             var element = Ember.$('<ins/>').get(0);
             selection.getRangeAt(0).surroundContents(element);
-            this.showFloatingAnnotationWidget(null, element, mouseX, mouseY);
+            this.showFloatingAnnotationWidget(element, mouseX, mouseY);
         },
 
         elementHovered: function() {
@@ -433,7 +496,7 @@ export default BaseController.extend({
     },
 
     setDocument: function() {
-        if (!this.get('model') || !this.get('model.annotated_body') || this.toString().indexOf('template/index') < 0) {
+        if (!this.get('model') || !this.get('model.annotated_body')) {
             return;
         }
         this.get('documentView').displayDocument(this.get('model.annotated_body'),
@@ -450,11 +513,112 @@ export default BaseController.extend({
             });
             this.set('extractionTools', {});
             this.enableExtractionTool(this.get('capabilities.plugins').get(0)['component'] || 'annotations-plugin');
+            this.suggestAnnotations();
         }.bind(this));
-    }.observes('model', 'model.annotated_body'),
+    },
 
-    willEnter: function() {
+    suggestAnnotations: function() {
+        if (this.hasAnnotations()) {
+            return;
+        }
+        let docView = this.get('documentView');
+
+        let item = this.get('scrapedItem');
+        let fields = new Set(item.get('fields').map(field => field.name));
+
+        let doc = docView.getIframeNode().contentDocument;
+        suggestAnnotations(doc, fields, (suggestions) => {
+            if (this.hasAnnotations()) {
+                return;
+            }
+            this.dissmissAllSuggestions();
+            let annotations = this.get('activeExtractionTool.data.extracts');
+            for (let [field, node, attr, suggestor] of suggestions) {
+                let mapping = {};
+                mapping[attr] = field;
+                annotations.pushObject(Ember.Object.create({
+                    annotations: mapping,
+                    id: utils.shortGuid(),
+                    tagid: $(node).data('tagid'),
+                    suggested: true,
+                    suggestor: suggestor,
+                    required: [],
+                }));
+            }
+        });
+    },
+
+    suggestionCount: function() {
+        let annotations = this.getWithDefault('activeExtractionTool.data.extracts', []);
+        let count = 0;
+        for (let annotation of annotations) {
+            if(annotation.suggested) {
+                count++;
+            }
+        }
+        return count;
+    }.property('activeExtractionTool.data.extracts.@each.suggested'),
+
+    severalSuggestions: Ember.computed.gte('suggestionCount', 2),
+
+    dissmissAllSuggestions: function(userInitiated=false) {
+        let annotations = this.getWithDefault('activeExtractionTool.data.extracts', []);
+        annotations.removeObjects(annotations.filter((annotation) => {
+            if(userInitiated) {
+                this.get('ws').logEvent('suggestions', annotation.suggestor, 'rejected_all');
+            }
+            return annotation.suggested;
+        }));
+        if(userInitiated) {
+            this.get('ws').logEvent('suggestions.all', 'rejected');
+        }
+    },
+
+    acceptAllSuggestions: function() {
+        this.get('ws').logEvent('suggestions.all', 'accepted');
+        let annotations = this.getWithDefault('activeExtractionTool.data.extracts', []);
+        for (let annotation of annotations) {
+            if(annotation.suggested) {
+                this.get('ws').logEvent('suggestions', annotation.suggestor, 'accepted_all');
+                annotation.set('suggested', false);
+            }
+        }
+    },
+
+    /**
+     * This will make sure the template scrapes a valid item and if not it will create one.
+     */
+    ensureItem: function() {
+        if (this.get('model') &&  !this.get('items').findBy('name', this.get('model.scrapes'))) {
+            // Template has an item that doesn't exist, create a new one
+            var fields = new Set();
+            Object.values(this.get('model.plugins')).forEach((plugin) => {
+                plugin.extracts.forEach((extract) => {
+                    Object.values(extract.annotations).forEach((fieldName) => {
+                        fields.add(fieldName);
+                    });
+                });
+            });
+            var item = Item.create({
+                name: this.get('model.scrapes'),
+                display_name: this.get('model.name'),
+                fields: []
+            });
+            fields.forEach((fieldName) => item.addField(fieldName));
+            this.get('items').pushObject(item);
+            this.showWarningNotification('Missing item',
+                "This template didn't have a valid item assigned so a new one was created.");
+            this.get('slyd').saveItems(this.get('items').toArray());
+        }
+    }.observes('model.scrapes', 'items.@each'),
+
+    _willEnter: function() { // willEnter template.index controller
         var plugins = {};
+        this.get('documentView').config({
+            mode: 'select',
+            listener: this,
+            partialSelects: true,
+        });
         this.get('capabilities.plugins').forEach(function(plugin) {
             plugins[plugin['component'].replace(/\./g, '_')] = plugin['options'];
         });
@@ -463,9 +627,9 @@ export default BaseController.extend({
         this.setDocument();
     },
 
-    willLeave: function() {
+    _willLeave: function() { // willLeave template.index controller
         this.hideFloatingAnnotationWidget();
-        this.get('documentView').hideHoveredInfo();
+        this.get('documentView').reset();
         this.set('activeExtractionTool', {extracts: [],
                                           component: 'dummy-component',
                                           pluginState: {}});

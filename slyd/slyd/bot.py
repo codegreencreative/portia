@@ -17,8 +17,9 @@ import json
 import errno
 
 from functools import partial
+from twisted.web.http import RESPONSES
 from twisted.web.resource import Resource
-from twisted.web.server import NOT_DONE_YET
+from twisted.web.server import failure, NOT_DONE_YET
 from scrapy.http import Request
 from scrapy.item import DictItem
 from scrapy import signals, log
@@ -26,6 +27,7 @@ from scrapy.crawler import CrawlerRunner
 from scrapy.http import HtmlResponse, XmlResponse
 from scrapy.exceptions import DontCloseSpider
 from scrapy.utils.request import request_fingerprint
+from scrapy.utils.serialize import ScrapyJSONEncoder
 try:
     from scrapy.spider import Spider
 except ImportError:
@@ -89,13 +91,24 @@ class Fetch(BotResource):
                 slyd_request_params=params
             )
         )
-        request = Request(**scrapy_request_kwargs)
+        request.notifyFinish().addErrback(self._requestDisconnect)
+
+        scrapy_request_kwargs.setdefault('headers', {})
+        user_agent = request.requestHeaders.getRawHeaders('user-agent')
+        if user_agent:
+            scrapy_request_kwargs['headers'].setdefault('user-agent',
+                                                        user_agent[0])
+        scrapy_request = Request(**scrapy_request_kwargs)
         self.bot.runner.crawl(SlydSpider)
         crawler = list(self.bot.runner.crawlers)[0]
         crawler.signals.connect(self.bot.keep_spider_alive,
                                 signals.spider_idle)
-        crawler.engine.schedule(request, crawler.spider)
+        crawler.engine.schedule(scrapy_request, crawler.spider)
+
         return NOT_DONE_YET
+
+    def _requestDisconnect(self, result):
+        self.bot.runner.stop()
 
     def _get_template_name(self, template_id, templates):
         for template in templates:
@@ -107,17 +120,24 @@ class Fetch(BotResource):
         result_response = dict(status=response.status,
                                headers=response.headers.to_string())
         if response.status != 200:
-            finish_request(request, response=result_response)
+            msg = "The request to the web-server was not successful. " \
+                  "The server returned: %d %s" % (
+                      response.status,
+                      RESPONSES[response.status])
+            finish_request(request, error=msg, response=result_response)
             return
         if not isinstance(response, (HtmlResponse, XmlResponse)):
-            msg = "Non-html response: %s" % response.headers.get(
-                'content-type', 'no content type')
+            msg = "The request to the web-server was not successful. " \
+                  "The web-server returned a non-html response: %s" % \
+                  response.headers.get(
+                      'content-type', 'no content type')
             finish_request(request, error=msg)
             return
         try:
             params = response.meta['slyd_request_params']
+            baseurl = params.get('baseurl', response.url)
             original_html = extract_html(response)
-            cleaned_html = html4annotation(original_html, response.url)
+            cleaned_html = html4annotation(original_html, baseurl)
             # we may want to include some headers
             fingerprint = request_fingerprint(response.request)
             result_response = dict(status=response.status,
@@ -144,10 +164,8 @@ class Fetch(BotResource):
                 result['items'] = items
                 result['links'] = links
             finish_request(request, **result)
-        except Exception as ex:
-            log.err(ex)
-            finish_request(request, response=result_response,
-                           error="unexpected internal error: %s" % ex)
+        except Exception:
+            request.processingFailed(failure.Failure())
 
     def create_spider(self, project, auth_info, params, **kwargs):
         spider = params.get('spider')
@@ -155,15 +173,7 @@ class Fetch(BotResource):
             return None, None
         pspec = self.bot.spec_manager.project_spec(project, auth_info)
         try:
-            spider_spec = pspec.resource('spiders', spider)
-            spider_spec['templates'] = []
-            for template in spider_spec.get('template_names', []):
-                try:
-                    spider_spec['templates'].append(
-                        pspec.resource('spiders', spider, template))
-                except TypeError:
-                    # Template names not consistent with templates
-                    pspec.remove_template(spider, template)
+            spider_spec = pspec.spider_with_templates(spider)
             items_spec = pspec.resource('items')
             extractors = pspec.resource('extractors')
             return (IblSpider(spider, spider_spec, items_spec, extractors,
@@ -172,17 +182,20 @@ class Fetch(BotResource):
         except IOError as ex:
             if ex.errno == errno.ENOENT:
                 log.msg("skipping extraction, no spec: %s" % ex.filename)
+                return None, None
             else:
                 raise
 
     def fetch_errback(self, twisted_request, failure):
-        msg = "unexpected error response: %s" % failure
-        log.msg(msg, level=log.ERROR)
+        msg = "The request to the web-server failed. " \
+              "The crawler engine returned an error: %s" \
+              % failure.getErrorMessage()
+        log.err(failure)
         finish_request(twisted_request, error=msg)
 
 
 def finish_request(trequest, **resp_obj):
-    jdata = json.dumps(resp_obj)
+    jdata = json.dumps(resp_obj, cls=ScrapyJSONEncoder, sort_keys=True)
     trequest.setResponseCode(200)
     trequest.setHeader('Content-Type', 'application/json')
     trequest.setHeader('Content-Length', len(jdata))
